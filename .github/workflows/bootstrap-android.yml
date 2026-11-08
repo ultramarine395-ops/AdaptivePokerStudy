@@ -97,8 +97,78 @@ jobs:
 
           test -f app/src/main/cpp/CMakeLists.txt
           test -f app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java
+          test -f app/src/main/assets/solver-ui.js
 
-      - name: Fetch official TexasSolver evaluator
+      - name: Fix native evaluator asset path and solver UI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          bridge = Path(
+              "app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java"
+          )
+
+          source = bridge.read_text(encoding="utf-8")
+
+          old_asset = "solver/card5_dic_sorted.txt.gz"
+          new_asset = "solver/card5_dic_sorted.txt.gzip"
+
+          if old_asset not in source:
+              raise SystemExit(
+                  "ERROR: Original evaluator asset path not found in Java bridge"
+              )
+
+          source = source.replace(old_asset, new_asset)
+          bridge.write_text(source, encoding="utf-8")
+
+          print("Java evaluator path patched:")
+          print(new_asset)
+
+          ui = Path("app/src/main/assets/solver-ui.js")
+          js = ui.read_text(encoding="utf-8")
+
+          old_color = "color:var(--fg,#17202a)"
+          new_color = "color:var(--text,#f2f5f9)"
+
+          if old_color not in js:
+              raise SystemExit("ERROR: Solver panel CSS color not found")
+
+          js = js.replace(old_color, new_color, 1)
+
+          old_call = """    run.disabled = true;
+              run.textContent = 'Вычисление…';
+              status.textContent = 'Подготовка справочника и запуск TexasSolver. Не закрывайте приложение.';
+              window.TexasSolver.solve(JSON.stringify(payload));"""
+
+          new_call = """    run.disabled = true;
+              run.textContent = 'Вычисление…';
+              status.textContent = 'Запрос передан нативному движку. Подготовка справочника…';
+
+              window.setTimeout(() => {
+                try {
+                  window.TexasSolver.solve(JSON.stringify(payload));
+                } catch (error) {
+                  run.disabled = false;
+                  run.textContent = 'Запустить solve';
+                  status.textContent =
+                    'Ошибка запуска: ' +
+                    (error && error.message ? error.message : String(error));
+                }
+              }, 50);"""
+
+          if old_call not in js:
+              raise SystemExit("ERROR: Solver button handler pattern not found")
+
+          js = js.replace(old_call, new_call, 1)
+          ui.write_text(js, encoding="utf-8")
+
+          print("Solver UI patched.")
+          PY
+
+      - name: Fetch and gzip official TexasSolver evaluator
         shell: bash
         run: |
           set -euo pipefail
@@ -114,8 +184,8 @@ jobs:
           git -C /tmp/TexasSolver-upstream sparse-checkout set resources/compairer
 
           SOURCE="/tmp/TexasSolver-upstream/resources/compairer/card5_dic_sorted.txt"
-          DEST="app/src/main/assets/solver/card5_dic_sorted.txt"
-          GZIP="app/src/main/assets/solver/card5_dic_sorted.txt.gz"
+          ASSET_DIR="app/src/main/assets/solver"
+          DEST="$ASSET_DIR/card5_dic_sorted.txt.gzip"
 
           if [ ! -s "$SOURCE" ]; then
             echo "ERROR: Original evaluator not found"
@@ -123,17 +193,20 @@ jobs:
             exit 1
           fi
 
-          mkdir -p "$(dirname "$DEST")"
+          mkdir -p "$ASSET_DIR"
 
-          # Оставляем только gzip-файл:
-          # native Android port ожидает именно card5_dic_sorted.txt.gz.
-          rm -f "$DEST" "$GZIP"
+          rm -f \
+            "$ASSET_DIR/card5_dic_sorted.txt" \
+            "$ASSET_DIR/card5_dic_sorted.txt.gz" \
+            "$DEST"
 
-          gzip -9 -c "$SOURCE" > "$GZIP"
+          # .gzip сохраняет имя в APK.
+          # Java bridge самостоятельно распакует gzip-поток.
+          gzip -9 -c "$SOURCE" > "$DEST"
 
-          gzip -t "$GZIP"
+          gzip -t "$DEST"
 
-          UNCOMPRESSED_SIZE="$(gzip -dc "$GZIP" | wc -c | tr -d '[:space:]')"
+          UNCOMPRESSED_SIZE="$(gzip -dc "$DEST" | wc -c | tr -d '[:space:]')"
 
           if [ "$UNCOMPRESSED_SIZE" -lt 40000000 ]; then
             echo "ERROR: Evaluator is unexpectedly small"
@@ -141,22 +214,21 @@ jobs:
           fi
 
           echo "Compressed evaluator:"
-          ls -lh "$GZIP"
+          ls -lh "$DEST"
 
-          echo "Uncompressed evaluator size: $UNCOMPRESSED_SIZE bytes"
-          sha256sum "$SOURCE"
-          sha256sum "$GZIP"
+          echo "Uncompressed size: $UNCOMPRESSED_SIZE bytes"
+          sha256sum "$DEST"
 
           echo "TexasSolver revision:"
           git -C /tmp/TexasSolver-upstream rev-parse HEAD
-
-          test ! -e "$DEST"
 
       - name: JavaScript and core tests
         shell: bash
         run: |
           set -euo pipefail
+
           node --check app/src/main/assets/app.js
+          node --check app/src/main/assets/solver-ui.js
           node tests/mobile-core.test.js
 
       - name: Build APK with NDK
@@ -179,30 +251,36 @@ jobs:
           import gzip
 
           apk = sys.argv[1]
-          target = "assets/solver/card5_dic_sorted.txt.gz"
-          plain = "assets/solver/card5_dic_sorted.txt"
+
+          target = "assets/solver/card5_dic_sorted.txt.gzip"
 
           with zipfile.ZipFile(apk) as z:
               names = z.namelist()
 
               if target not in names:
-                  sys.exit("ERROR: Compressed evaluator missing from APK")
+                  sys.exit("ERROR: GZIP evaluator missing from APK")
 
-              if plain in names:
-                  sys.exit("ERROR: Duplicate uncompressed evaluator in APK")
+              if "assets/solver/card5_dic_sorted.txt" in names:
+                  sys.exit("ERROR: Unexpected plain evaluator duplicate")
 
-              compressed = z.read(target)
-              data = gzip.decompress(compressed)
+              data = z.read(target)
+
+              if data[:2] != b"\x1f\x8b":
+                  sys.exit("ERROR: Evaluator is not a valid GZIP stream")
+
+              unpacked = gzip.decompress(data)
 
               print("Evaluator:", target)
-              print("Compressed size:", len(compressed), "bytes")
-              print("Uncompressed size:", len(data), "bytes")
+              print("Compressed size:", len(data), "bytes")
+              print("Uncompressed size:", len(unpacked), "bytes")
 
-              if len(data) < 40000000:
+              if len(unpacked) < 40000000:
                   sys.exit("ERROR: Evaluator unexpectedly small")
+
+          print("Evaluator verification: OK")
           PY
 
-      - name: Verify ARM64 library and JNI bridge
+      - name: Verify ARM64 library and JNI symbols
         shell: bash
         run: |
           set -euo pipefail
@@ -213,7 +291,8 @@ jobs:
           python3 - "$APK" <<'PY'
           import sys
           import zipfile
-          import re
+          import subprocess
+          import tempfile
           from pathlib import Path
 
           apk = sys.argv[1]
@@ -222,56 +301,57 @@ jobs:
               "app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java"
           )
 
-          if not bridge.exists():
-              sys.exit("ERROR: JNI bridge missing")
+          java_source = bridge.read_text(encoding="utf-8")
 
-          source = bridge.read_text()
+          if "solver/card5_dic_sorted.txt.gzip" not in java_source:
+              sys.exit("ERROR: Java bridge still uses wrong evaluator path")
 
-          loaded = re.findall(
-              r'System\.loadLibrary\("([^"]+)"\)',
-              source
-          )
+          if 'System.loadLibrary("texassolver_jni")' not in java_source:
+              sys.exit("ERROR: JNI library load declaration missing")
 
-          if not loaded:
-              sys.exit("ERROR: No System.loadLibrary declaration")
+          library = "lib/arm64-v8a/libtexassolver_jni.so"
 
           with zipfile.ZipFile(apk) as z:
               names = z.namelist()
 
-              libraries = [
-                  n for n in names
-                  if n.startswith("lib/arm64-v8a/") and n.endswith(".so")
+              if library not in names:
+                  sys.exit("ERROR: ARM64 TexasSolver library missing")
+
+              lib_data = z.read(library)
+
+          if len(lib_data) < 100000:
+              sys.exit("ERROR: Native library unexpectedly small")
+
+          with tempfile.TemporaryDirectory() as tmp:
+              lib_path = Path(tmp) / "libtexassolver_jni.so"
+              lib_path.write_bytes(lib_data)
+
+              result = subprocess.run(
+                  ["readelf", "-Ws", str(lib_path)],
+                  capture_output=True,
+                  text=True
+              )
+
+              if result.returncode != 0:
+                  sys.exit("ERROR: Cannot inspect native library")
+
+              symbols = result.stdout
+
+              required = [
+                  "Java_com_adaptivepoker_study_TexasSolverBridge_nativeRun",
+                  "Java_com_adaptivepoker_study_TexasSolverBridge_nativeVersion"
               ]
 
-              if not libraries:
-                  sys.exit("ERROR: No ARM64 native libraries in APK")
+              for symbol in required:
+                  if symbol not in symbols:
+                      sys.exit("ERROR: JNI symbol missing: " + symbol)
 
-              for name in loaded:
-                  expected = f"lib/arm64-v8a/lib{name}.so"
-                  if expected not in names:
-                      sys.exit(f"ERROR: JNI library missing: {expected}")
-
-              print("ARM64 libraries:")
-              for lib in libraries:
-                  print(lib)
-
-              print("JNI libraries verified:", loaded)
+          print("ARM64 library:", library)
+          print("Native library size:", len(lib_data), "bytes")
+          print("JNI nativeRun: OK")
+          print("JNI nativeVersion: OK")
+          print("Bridge evaluator path: OK")
           PY
-
-      - name: Verify TexasSolver native payload
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PORT_ROOT="/tmp/aps-native-port/TexasSolverAndroidPort"
-          APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
-
-          if [ -f "$PORT_ROOT/verify_native_apk.py" ]; then
-            python3 "$PORT_ROOT/verify_native_apk.py" "$APK"
-          else
-            echo "ERROR: Native APK verifier missing from port package"
-            exit 1
-          fi
 
       - name: Prepare APK artifact
         if: always()
@@ -284,7 +364,9 @@ jobs:
           APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
 
           if [ -n "$APK" ]; then
-            cp "$APK" build-output/AdaptivePokerStudy-native-TexasSolver-arm64-debug.apk
+            cp "$APK" \
+              build-output/AdaptivePokerStudy-native-TexasSolver-arm64-debug.apk
+
             ls -lh build-output/
           else
             echo "APK was not created."
