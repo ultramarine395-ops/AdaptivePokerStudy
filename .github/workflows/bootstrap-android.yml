@@ -45,7 +45,7 @@ jobs:
       - name: Android SDK, NDK and CMake
         shell: bash
         run: |
-          set +o pipefail
+          set -euo pipefail
 
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
@@ -55,8 +55,7 @@ jobs:
             exit 1
           fi
 
-          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
-          set -o pipefail
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses || true
 
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
             "platform-tools" \
@@ -81,6 +80,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p /tmp/aps-native-port
           unzip -q TexasSolverAndroidPort_v2.zip -d /tmp/aps-native-port
 
@@ -103,8 +103,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Cloning official TexasSolver console branch..."
-
           git clone \
             --depth 1 \
             --filter=blob:none \
@@ -117,6 +115,7 @@ jobs:
 
           SOURCE="/tmp/TexasSolver-upstream/resources/compairer/card5_dic_sorted.txt"
           DEST="app/src/main/assets/solver/card5_dic_sorted.txt"
+          GZIP="app/src/main/assets/solver/card5_dic_sorted.txt.gz"
 
           if [ ! -s "$SOURCE" ]; then
             echo "ERROR: Official evaluator not found"
@@ -125,39 +124,30 @@ jobs:
           fi
 
           mkdir -p "$(dirname "$DEST")"
+
+          # Android treats .txt and .txt.gz as conflicting asset names.
+          rm -f "$DEST" "$GZIP"
+
           cp "$SOURCE" "$DEST"
 
           SIZE=$(stat -c%s "$DEST")
-
-          echo "Evaluator copied successfully"
-          echo "Size: $SIZE bytes"
-          echo "TexasSolver revision:"
-          git -C /tmp/TexasSolver-upstream rev-parse HEAD
 
           if [ "$SIZE" -lt 40000000 ]; then
             echo "ERROR: Evaluator is unexpectedly small"
             exit 1
           fi
 
-          sha256sum "$DEST"
+          echo "Evaluator copied:"
           ls -lh "$DEST"
+          sha256sum "$DEST"
 
-      - name: Configure Android assets
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo "TexasSolver revision:"
+          git -C /tmp/TexasSolver-upstream rev-parse HEAD
 
-          cat >> app/build.gradle.kts <<'EOF'
-
-          // TexasSolver evaluator assets
-          android {
-              sourceSets {
-                  getByName("main") {
-                      assets.srcDir("src/main/assets")
-                  }
-              }
-          }
-          EOF
+          if [ -e "$GZIP" ]; then
+            echo "ERROR: Duplicate compressed evaluator still exists"
+            exit 1
+          fi
 
       - name: JavaScript and core tests
         shell: bash
@@ -185,26 +175,23 @@ jobs:
           import zipfile
 
           apk = sys.argv[1]
-          candidates = [
-              "assets/solver/card5_dic_sorted.txt",
-              "assets/solver/card5_dic_sorted.txt.gz"
-          ]
+          target = "assets/solver/card5_dic_sorted.txt"
 
           with zipfile.ZipFile(apk) as z:
               names = z.namelist()
-              found = [p for p in candidates if p in names]
 
-              if not found:
-                  print("ERROR: Evaluator missing from APK")
-                  sys.exit(1)
+              if target not in names:
+                  sys.exit("ERROR: Evaluator missing from APK")
 
-              for path in found:
-                  info = z.getinfo(path)
-                  print("Evaluator:", path)
-                  print("Size:", info.file_size, "bytes")
+              if "assets/solver/card5_dic_sorted.txt.gz" in names:
+                  sys.exit("ERROR: Duplicate compressed evaluator in APK")
 
-                  if info.file_size < 40000000:
-                      sys.exit("ERROR: Evaluator unexpectedly small")
+              info = z.getinfo(target)
+              print("Evaluator:", target)
+              print("Size:", info.file_size, "bytes")
+
+              if info.file_size < 40000000:
+                  sys.exit("ERROR: Evaluator unexpectedly small")
           PY
 
       - name: Verify ARM64 library and JNI bridge
