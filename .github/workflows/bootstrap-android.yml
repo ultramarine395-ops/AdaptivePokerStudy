@@ -23,6 +23,7 @@ jobs:
             echo "Missing AdaptivePokerStudy_v060.zip"
             exit 1
           }
+
           test -f TexasSolverAndroidPort_v2.zip || {
             echo "Missing TexasSolverAndroidPort_v2.zip"
             exit 1
@@ -50,6 +51,7 @@ jobs:
         shell: bash
         run: |
           set +o pipefail
+
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
 
@@ -59,6 +61,7 @@ jobs:
           fi
 
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
+
           set -o pipefail
 
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
@@ -73,6 +76,7 @@ jobs:
           fi
 
           test -d "$SDK_ROOT/ndk/27.2.12479018"
+
           echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_LATEST_HOME=$SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
           echo "$SDK_ROOT/cmake/3.22.1/bin" >> "$GITHUB_PATH"
@@ -95,7 +99,7 @@ jobs:
           test -f app/src/main/cpp/CMakeLists.txt
           test -f app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java
 
-            - name: Ensure evaluator is present in Android assets
+      - name: Ensure evaluator is present in Android assets
         shell: bash
         run: |
           set -euo pipefail
@@ -104,8 +108,8 @@ jobs:
           mkdir -p "$(dirname "$DEST")"
 
           if [ ! -s "$DEST" ]; then
-            SOURCE="$(find /tmp/aps-native-port -type f \
-              -name 'card5_dic_sorted.txt' -print -quit)"
+            SOURCE="$(find /tmp/aps-native-port app/src/main \
+              -type f -name 'card5_dic_sorted.txt' -print -quit)"
 
             if [ -z "$SOURCE" ]; then
               echo "ERROR: Original evaluator not found"
@@ -124,6 +128,7 @@ jobs:
           fi
 
           ls -lh "$DEST"
+          sha256sum "$DEST"
 
       - name: Configure Android assets
         shell: bash
@@ -151,7 +156,7 @@ jobs:
         run: |
           gradle clean assembleDebug --stacktrace --no-daemon
 
-            - name: Verify evaluator inside APK
+      - name: Verify evaluator inside APK
         shell: bash
         run: |
           set -euo pipefail
@@ -164,6 +169,7 @@ jobs:
           import zipfile
 
           apk = sys.argv[1]
+
           candidates = [
               "assets/solver/card5_dic_sorted.txt",
               "assets/solver/card5_dic_sorted.txt.gz"
@@ -179,6 +185,7 @@ jobs:
 
               for path in found:
                   info = z.getinfo(path)
+
                   print("Evaluator found:", path)
                   print("Size:", info.file_size, "bytes")
 
@@ -193,20 +200,7 @@ jobs:
           set -euo pipefail
 
           APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
-
-          unzip -l "$APK" | grep 'lib/arm64-v8a/'
-
-          if ! unzip -l "$APK" | grep -E 'lib/arm64-v8a/.*\.so'; then
-            echo "ERROR: No ARM64 native libraries found"
-            exit 1
-          fi
-
-      -       - name: Verify TexasSolver native payload
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
+          test -n "$APK"
 
           python3 - "$APK" <<'PY'
           import sys
@@ -219,29 +213,13 @@ jobs:
           with zipfile.ZipFile(apk) as z:
               names = z.namelist()
 
-              evaluator = [
-                  n for n in names
-                  if n in (
-                      "assets/solver/card5_dic_sorted.txt",
-                      "assets/solver/card5_dic_sorted.txt.gz"
-                  )
-              ]
-
               libraries = [
                   n for n in names
                   if n.startswith("lib/arm64-v8a/") and n.endswith(".so")
               ]
 
-              if not evaluator:
-                  sys.exit("ERROR: evaluator missing")
-
               if not libraries:
-                  sys.exit("ERROR: ARM64 native libraries missing")
-
-              print("Evaluator:", evaluator)
-              print("ARM64 libraries:")
-              for lib in libraries:
-                  print(" ", lib)
+                  sys.exit("ERROR: No ARM64 native libraries found")
 
               bridge = Path(
                   "app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java"
@@ -251,6 +229,7 @@ jobs:
                   sys.exit("ERROR: JNI bridge missing")
 
               source = bridge.read_text()
+
               loaded = re.findall(
                   r'System\.loadLibrary\("([^"]+)"\)',
                   source
@@ -261,17 +240,32 @@ jobs:
 
               for name in loaded:
                   expected = f"lib/arm64-v8a/lib{name}.so"
+
                   if expected not in names:
                       sys.exit(f"ERROR: JNI library missing: {expected}")
 
+              print("ARM64 libraries:")
+              for lib in libraries:
+                  print(" ", lib)
+
               print("JNI libraries verified:", loaded)
-              print("Native payload checks passed")
           PY
+
+      - name: Verify TexasSolver native payload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PORT_ROOT="/tmp/aps-native-port/TexasSolverAndroidPort"
+          APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
+
+          python3 "$PORT_ROOT/verify_native_apk.py" "$APK"
 
       - name: Prepare APK artifact
         shell: bash
         run: |
           mkdir -p build-output
+
           cp app/build/outputs/apk/debug/*.apk \
             build-output/AdaptivePokerStudy-native-TexasSolver-arm64-debug.apk
 
