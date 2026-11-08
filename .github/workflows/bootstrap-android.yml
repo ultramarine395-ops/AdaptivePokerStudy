@@ -19,19 +19,14 @@ jobs:
       - name: Check input archives
         shell: bash
         run: |
-          test -f AdaptivePokerStudy_v060.zip || {
-            echo "Missing AdaptivePokerStudy_v060.zip"
-            exit 1
-          }
-
-          test -f TexasSolverAndroidPort_v2.zip || {
-            echo "Missing TexasSolverAndroidPort_v2.zip"
-            exit 1
-          }
+          set -euo pipefail
+          test -f AdaptivePokerStudy_v060.zip
+          test -f TexasSolverAndroidPort_v2.zip
 
       - name: Unpack Android project
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p /tmp/aps-project
           unzip -q AdaptivePokerStudy_v060.zip -d /tmp/aps-project
           cp -a /tmp/aps-project/AdaptivePokerAndroid/. .
@@ -56,12 +51,11 @@ jobs:
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
 
           if [ -z "$SDKMANAGER" ]; then
-            echo "sdkmanager not found"
+            echo "ERROR: sdkmanager not found"
             exit 1
           fi
 
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
-
           set -o pipefail
 
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
@@ -86,12 +80,17 @@ jobs:
       - name: Unpack TexasSolver Android port
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p /tmp/aps-native-port
           unzip -q TexasSolverAndroidPort_v2.zip -d /tmp/aps-native-port
+
+          test -f /tmp/aps-native-port/TexasSolverAndroidPort/apply_texassolver_android.py
 
       - name: Integrate TexasSolver C++ source and JNI
         shell: bash
         run: |
+          set -euo pipefail
+
           PORT_ROOT="/tmp/aps-native-port/TexasSolverAndroidPort"
 
           python3 "$PORT_ROOT/apply_texassolver_android.py"
@@ -99,40 +98,55 @@ jobs:
           test -f app/src/main/cpp/CMakeLists.txt
           test -f app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java
 
-      - name: Ensure evaluator is present in Android assets
+      - name: Fetch official TexasSolver evaluator
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "Cloning official TexasSolver console branch..."
+
+          git clone \
+            --depth 1 \
+            --filter=blob:none \
+            --sparse \
+            --branch console \
+            https://github.com/bupticybee/TexasSolver.git \
+            /tmp/TexasSolver-upstream
+
+          git -C /tmp/TexasSolver-upstream sparse-checkout set resources/compairer
+
+          SOURCE="/tmp/TexasSolver-upstream/resources/compairer/card5_dic_sorted.txt"
           DEST="app/src/main/assets/solver/card5_dic_sorted.txt"
-          mkdir -p "$(dirname "$DEST")"
 
-          if [ ! -s "$DEST" ]; then
-            SOURCE="$(find /tmp/aps-native-port app/src/main \
-              -type f -name 'card5_dic_sorted.txt' -print -quit)"
-
-            if [ -z "$SOURCE" ]; then
-              echo "ERROR: Original evaluator not found"
-              exit 1
-            fi
-
-            cp "$SOURCE" "$DEST"
+          if [ ! -s "$SOURCE" ]; then
+            echo "ERROR: Official evaluator not found"
+            find /tmp/TexasSolver-upstream -iname '*card5*'
+            exit 1
           fi
 
+          mkdir -p "$(dirname "$DEST")"
+          cp "$SOURCE" "$DEST"
+
           SIZE=$(stat -c%s "$DEST")
-          echo "Evaluator size: $SIZE bytes"
+
+          echo "Evaluator copied successfully"
+          echo "Size: $SIZE bytes"
+          echo "TexasSolver revision:"
+          git -C /tmp/TexasSolver-upstream rev-parse HEAD
 
           if [ "$SIZE" -lt 40000000 ]; then
             echo "ERROR: Evaluator is unexpectedly small"
             exit 1
           fi
 
-          ls -lh "$DEST"
           sha256sum "$DEST"
+          ls -lh "$DEST"
 
       - name: Configure Android assets
         shell: bash
         run: |
+          set -euo pipefail
+
           cat >> app/build.gradle.kts <<'EOF'
 
           // TexasSolver evaluator assets
@@ -148,12 +162,14 @@ jobs:
       - name: JavaScript and core tests
         shell: bash
         run: |
+          set -euo pipefail
           node --check app/src/main/assets/app.js
           node tests/mobile-core.test.js
 
       - name: Build APK with NDK
         shell: bash
         run: |
+          set -euo pipefail
           gradle clean assembleDebug --stacktrace --no-daemon
 
       - name: Verify evaluator inside APK
@@ -169,7 +185,6 @@ jobs:
           import zipfile
 
           apk = sys.argv[1]
-
           candidates = [
               "assets/solver/card5_dic_sorted.txt",
               "assets/solver/card5_dic_sorted.txt.gz"
@@ -185,16 +200,14 @@ jobs:
 
               for path in found:
                   info = z.getinfo(path)
-
-                  print("Evaluator found:", path)
+                  print("Evaluator:", path)
                   print("Size:", info.file_size, "bytes")
 
-                  if info.file_size < 1000000:
-                      print("ERROR: Evaluator unexpectedly small")
-                      sys.exit(1)
+                  if info.file_size < 40000000:
+                      sys.exit("ERROR: Evaluator unexpectedly small")
           PY
 
-      - name: Verify native ARM64 library
+      - name: Verify ARM64 library and JNI bridge
         shell: bash
         run: |
           set -euo pipefail
@@ -210,6 +223,23 @@ jobs:
 
           apk = sys.argv[1]
 
+          bridge = Path(
+              "app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java"
+          )
+
+          if not bridge.exists():
+              sys.exit("ERROR: JNI bridge missing")
+
+          source = bridge.read_text()
+
+          loaded = re.findall(
+              r'System\.loadLibrary\("([^"]+)"\)',
+              source
+          )
+
+          if not loaded:
+              sys.exit("ERROR: No System.loadLibrary declaration")
+
           with zipfile.ZipFile(apk) as z:
               names = z.namelist()
 
@@ -219,34 +249,16 @@ jobs:
               ]
 
               if not libraries:
-                  sys.exit("ERROR: No ARM64 native libraries found")
-
-              bridge = Path(
-                  "app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java"
-              )
-
-              if not bridge.exists():
-                  sys.exit("ERROR: JNI bridge missing")
-
-              source = bridge.read_text()
-
-              loaded = re.findall(
-                  r'System\.loadLibrary\("([^"]+)"\)',
-                  source
-              )
-
-              if not loaded:
-                  sys.exit("ERROR: No System.loadLibrary in JNI bridge")
+                  sys.exit("ERROR: No ARM64 native libraries in APK")
 
               for name in loaded:
                   expected = f"lib/arm64-v8a/lib{name}.so"
-
                   if expected not in names:
                       sys.exit(f"ERROR: JNI library missing: {expected}")
 
               print("ARM64 libraries:")
               for lib in libraries:
-                  print(" ", lib)
+                  print(lib)
 
               print("JNI libraries verified:", loaded)
           PY
@@ -259,15 +271,24 @@ jobs:
           PORT_ROOT="/tmp/aps-native-port/TexasSolverAndroidPort"
           APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
 
-          python3 "$PORT_ROOT/verify_native_apk.py" "$APK"
+          if [ -f "$PORT_ROOT/verify_native_apk.py" ]; then
+            python3 "$PORT_ROOT/verify_native_apk.py" "$APK"
+          else
+            echo "ERROR: Native APK verifier missing from port package"
+            exit 1
+          fi
 
       - name: Prepare APK artifact
         shell: bash
         run: |
+          set -euo pipefail
+
           mkdir -p build-output
 
           cp app/build/outputs/apk/debug/*.apk \
             build-output/AdaptivePokerStudy-native-TexasSolver-arm64-debug.apk
+
+          ls -lh build-output/
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
