@@ -95,39 +95,35 @@ jobs:
           test -f app/src/main/cpp/CMakeLists.txt
           test -f app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java
 
-      - name: Ensure evaluator is present in Android assets
+            - name: Ensure evaluator is present in Android assets
         shell: bash
         run: |
           set -euo pipefail
 
-          DEST="app/src/main/assets/solver/card5_dic_sorted.txt.gz"
+          DEST="app/src/main/assets/solver/card5_dic_sorted.txt"
           mkdir -p "$(dirname "$DEST")"
 
           if [ ! -s "$DEST" ]; then
-            SOURCE="$(find /tmp/aps-native-port app/src/main -type f \
-              -name 'card5_dic_sorted.txt.gz' -print -quit)"
+            SOURCE="$(find /tmp/aps-native-port -type f \
+              -name 'card5_dic_sorted.txt' -print -quit)"
 
-            if [ -n "$SOURCE" ]; then
-              cp "$SOURCE" "$DEST"
-            else
-              RAW="$(find /tmp/aps-native-port app/src/main -type f \
-                -name 'card5_dic_sorted.txt' -print -quit)"
-
-              if [ -n "$RAW" ]; then
-                gzip -c "$RAW" > "$DEST"
-              else
-                echo "ERROR: evaluator source not found."
-                echo "Searched for card5_dic_sorted.txt and .gz"
-                find /tmp/aps-native-port -maxdepth 6 -type f | head -200
-                exit 1
-              fi
+            if [ -z "$SOURCE" ]; then
+              echo "ERROR: Original evaluator not found"
+              exit 1
             fi
+
+            cp "$SOURCE" "$DEST"
           fi
 
-          test -s "$DEST"
-          echo "Evaluator successfully staged:"
+          SIZE=$(stat -c%s "$DEST")
+          echo "Evaluator size: $SIZE bytes"
+
+          if [ "$SIZE" -lt 40000000 ]; then
+            echo "ERROR: Evaluator is unexpectedly small"
+            exit 1
+          fi
+
           ls -lh "$DEST"
-          sha256sum "$DEST"
 
       - name: Configure Android assets
         shell: bash
@@ -155,7 +151,7 @@ jobs:
         run: |
           gradle clean assembleDebug --stacktrace --no-daemon
 
-      - name: Verify evaluator inside APK
+            - name: Verify evaluator inside APK
         shell: bash
         run: |
           set -euo pipefail
@@ -163,34 +159,32 @@ jobs:
           APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
           test -n "$APK"
 
-          echo "Checking APK assets..."
-          unzip -l "$APK" | grep -E 'assets/solver/|card5_dic'
-
           python3 - "$APK" <<'PY'
           import sys
           import zipfile
 
           apk = sys.argv[1]
-          expected = "assets/solver/card5_dic_sorted.txt.gz"
+          candidates = [
+              "assets/solver/card5_dic_sorted.txt",
+              "assets/solver/card5_dic_sorted.txt.gz"
+          ]
 
           with zipfile.ZipFile(apk) as z:
               names = z.namelist()
+              found = [p for p in candidates if p in names]
 
-              if expected not in names:
-                  print("APK VERIFY FAILED: missing", expected)
-                  print("Available evaluator entries:")
-                  for name in names:
-                      if "card5_dic" in name or "solver/" in name:
-                          print(name)
+              if not found:
+                  print("ERROR: Evaluator missing from APK")
                   sys.exit(1)
 
-              info = z.getinfo(expected)
-              if info.file_size == 0:
-                  print("APK VERIFY FAILED: evaluator is empty")
-                  sys.exit(1)
+              for path in found:
+                  info = z.getinfo(path)
+                  print("Evaluator found:", path)
+                  print("Size:", info.file_size, "bytes")
 
-              print("Evaluator found in APK:", expected)
-              print("Size:", info.file_size, "bytes")
+                  if info.file_size < 1000000:
+                      print("ERROR: Evaluator unexpectedly small")
+                      sys.exit(1)
           PY
 
       - name: Verify native ARM64 library
@@ -207,13 +201,72 @@ jobs:
             exit 1
           fi
 
-      - name: Verify TexasSolver payload
+      -       - name: Verify TexasSolver native payload
         shell: bash
         run: |
-          PORT_ROOT="/tmp/aps-native-port/TexasSolverAndroidPort"
+          set -euo pipefail
+
           APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
 
-          python3 "$PORT_ROOT/verify_native_apk.py" "$APK"
+          python3 - "$APK" <<'PY'
+          import sys
+          import zipfile
+          import re
+          from pathlib import Path
+
+          apk = sys.argv[1]
+
+          with zipfile.ZipFile(apk) as z:
+              names = z.namelist()
+
+              evaluator = [
+                  n for n in names
+                  if n in (
+                      "assets/solver/card5_dic_sorted.txt",
+                      "assets/solver/card5_dic_sorted.txt.gz"
+                  )
+              ]
+
+              libraries = [
+                  n for n in names
+                  if n.startswith("lib/arm64-v8a/") and n.endswith(".so")
+              ]
+
+              if not evaluator:
+                  sys.exit("ERROR: evaluator missing")
+
+              if not libraries:
+                  sys.exit("ERROR: ARM64 native libraries missing")
+
+              print("Evaluator:", evaluator)
+              print("ARM64 libraries:")
+              for lib in libraries:
+                  print(" ", lib)
+
+              bridge = Path(
+                  "app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java"
+              )
+
+              if not bridge.exists():
+                  sys.exit("ERROR: JNI bridge missing")
+
+              source = bridge.read_text()
+              loaded = re.findall(
+                  r'System\.loadLibrary\("([^"]+)"\)',
+                  source
+              )
+
+              if not loaded:
+                  sys.exit("ERROR: No System.loadLibrary in JNI bridge")
+
+              for name in loaded:
+                  expected = f"lib/arm64-v8a/lib{name}.so"
+                  if expected not in names:
+                      sys.exit(f"ERROR: JNI library missing: {expected}")
+
+              print("JNI libraries verified:", loaded)
+              print("Native payload checks passed")
+          PY
 
       - name: Prepare APK artifact
         shell: bash
