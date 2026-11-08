@@ -1,0 +1,28 @@
+{
+  "app": "Adaptive Poker Study",
+  "version": "0.6.0",
+  "date": "2026-11-08",
+  "checks": {
+    "javascript_syntax": "passed",
+    "node_core_tests": "passed",
+    "node_core_assertions": 20,
+    "android_xml_well_formed": "passed",
+    "real_hand_history_parser": {
+      "hands": 165,
+      "hero_decisions": 254,
+      "by_street": {"preflop": 170, "flop": 49, "turn": 27, "river": 8}
+    },
+    "previous_python_export_spot_key_parity": {
+      "matched": 254,
+      "total": 254
+    },
+    "texassolver_json_adapter": "tested on representative original-format fixture: action_node, nested strategy.strategy / strategy.evs, childrens and dealcards branches"
+  },
+  "not_verified": [
+    "APK compilation: unavailable Android SDK and Gradle installation in preparation environment",
+    "Installation and runtime behavior on a physical Android device",
+    "TexasSolver execution on Android: not included; app imports solver JSON output",
+    "Exact postflop action sizing equivalence unless solver units and game configuration are known",
+    "PKO bounty EV and ICM calculations"
+  ]
+}
