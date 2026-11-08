@@ -118,36 +118,39 @@ jobs:
           GZIP="app/src/main/assets/solver/card5_dic_sorted.txt.gz"
 
           if [ ! -s "$SOURCE" ]; then
-            echo "ERROR: Official evaluator not found"
+            echo "ERROR: Original evaluator not found"
             find /tmp/TexasSolver-upstream -iname '*card5*'
             exit 1
           fi
 
           mkdir -p "$(dirname "$DEST")"
 
-          # Android treats .txt and .txt.gz as conflicting asset names.
+          # Оставляем только gzip-файл:
+          # native Android port ожидает именно card5_dic_sorted.txt.gz.
           rm -f "$DEST" "$GZIP"
 
-          cp "$SOURCE" "$DEST"
+          gzip -9 -c "$SOURCE" > "$GZIP"
 
-          SIZE=$(stat -c%s "$DEST")
+          gzip -t "$GZIP"
 
-          if [ "$SIZE" -lt 40000000 ]; then
+          UNCOMPRESSED_SIZE="$(gzip -dc "$GZIP" | wc -c | tr -d '[:space:]')"
+
+          if [ "$UNCOMPRESSED_SIZE" -lt 40000000 ]; then
             echo "ERROR: Evaluator is unexpectedly small"
             exit 1
           fi
 
-          echo "Evaluator copied:"
-          ls -lh "$DEST"
-          sha256sum "$DEST"
+          echo "Compressed evaluator:"
+          ls -lh "$GZIP"
+
+          echo "Uncompressed evaluator size: $UNCOMPRESSED_SIZE bytes"
+          sha256sum "$SOURCE"
+          sha256sum "$GZIP"
 
           echo "TexasSolver revision:"
           git -C /tmp/TexasSolver-upstream rev-parse HEAD
 
-          if [ -e "$GZIP" ]; then
-            echo "ERROR: Duplicate compressed evaluator still exists"
-            exit 1
-          fi
+          test ! -e "$DEST"
 
       - name: JavaScript and core tests
         shell: bash
@@ -173,24 +176,29 @@ jobs:
           python3 - "$APK" <<'PY'
           import sys
           import zipfile
+          import gzip
 
           apk = sys.argv[1]
-          target = "assets/solver/card5_dic_sorted.txt"
+          target = "assets/solver/card5_dic_sorted.txt.gz"
+          plain = "assets/solver/card5_dic_sorted.txt"
 
           with zipfile.ZipFile(apk) as z:
               names = z.namelist()
 
               if target not in names:
-                  sys.exit("ERROR: Evaluator missing from APK")
+                  sys.exit("ERROR: Compressed evaluator missing from APK")
 
-              if "assets/solver/card5_dic_sorted.txt.gz" in names:
-                  sys.exit("ERROR: Duplicate compressed evaluator in APK")
+              if plain in names:
+                  sys.exit("ERROR: Duplicate uncompressed evaluator in APK")
 
-              info = z.getinfo(target)
+              compressed = z.read(target)
+              data = gzip.decompress(compressed)
+
               print("Evaluator:", target)
-              print("Size:", info.file_size, "bytes")
+              print("Compressed size:", len(compressed), "bytes")
+              print("Uncompressed size:", len(data), "bytes")
 
-              if info.file_size < 40000000:
+              if len(data) < 40000000:
                   sys.exit("ERROR: Evaluator unexpectedly small")
           PY
 
@@ -266,21 +274,27 @@ jobs:
           fi
 
       - name: Prepare APK artifact
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p build-output
 
-          cp app/build/outputs/apk/debug/*.apk \
-            build-output/AdaptivePokerStudy-native-TexasSolver-arm64-debug.apk
+          APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
 
-          ls -lh build-output/
+          if [ -n "$APK" ]; then
+            cp "$APK" build-output/AdaptivePokerStudy-native-TexasSolver-arm64-debug.apk
+            ls -lh build-output/
+          else
+            echo "APK was not created."
+          fi
 
       - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: AdaptivePokerStudy-native-TexasSolver-arm64-debug
           path: build-output/AdaptivePokerStudy-native-TexasSolver-arm64-debug.apk
-          if-no-files-found: error
+          if-no-files-found: warn
           
