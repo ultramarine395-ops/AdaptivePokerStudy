@@ -1,5 +1,5 @@
 
-name: Unpack project and build APK
+name: Build AdaptivePokerStudy with native TexasSolver
 
 on:
   workflow_dispatch:
@@ -15,11 +15,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Unpack project
+      - name: Unpack Android project
+        shell: bash
         run: |
-          mkdir -p /tmp/project
-          unzip -q AdaptivePokerStudy_v060.zip -d /tmp/project
-          cp -a /tmp/project/AdaptivePokerAndroid/. .
+          if [ -f AdaptivePokerStudy_v060.zip ]; then
+            mkdir -p /tmp/project
+            unzip -q AdaptivePokerStudy_v060.zip -d /tmp/project
+            cp -a /tmp/project/AdaptivePokerAndroid/. .
+          fi
+
+      - name: Unpack TexasSolver Android port
+        shell: bash
+        run: |
+          mkdir -p /tmp/texassolver-port
+          unzip -q TexasSolverAndroidPort_v1.zip -d /tmp/texassolver-port
+          cp -a /tmp/texassolver-port/. .
 
       - name: Java 17
         uses: actions/setup-java@v4
@@ -32,13 +42,17 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
-     
       - name: Android SDK
         shell: bash
         run: |
           set +o pipefail
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found"
+            exit 1
+          fi
 
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
 
@@ -51,8 +65,11 @@ jobs:
             ln -s android-37.0 "$SDK_ROOT/platforms/android-37"
           fi
 
-
-
+      - name: Verify native toolchain
+        run: |
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "ANDROID_NDK_LATEST_HOME=$ANDROID_NDK_LATEST_HOME"
+          ls -la "$ANDROID_HOME/ndk" || true
 
       - name: Tests
         run: |
@@ -65,6 +82,7 @@ jobs:
       - name: Save APK
         uses: actions/upload-artifact@v4
         with:
-          name: AdaptivePokerStudy-debug-apk
+          name: AdaptivePokerStudy-TexasSolver-debug
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
           
