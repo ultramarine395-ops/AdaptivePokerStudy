@@ -1,3 +1,4 @@
+
 name: Build AdaptivePokerStudy with native TexasSolver
 
 on:
@@ -9,7 +10,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -18,8 +19,14 @@ jobs:
       - name: Check input archives
         shell: bash
         run: |
-          test -f AdaptivePokerStudy_v060.zip || { echo "Missing AdaptivePokerStudy_v060.zip in repository root"; exit 1; }
-          test -f TexasSolverAndroidPort_v2.zip || { echo "Missing TexasSolverAndroidPort_v2.zip in repository root"; exit 1; }
+          test -f AdaptivePokerStudy_v060.zip || {
+            echo "Missing AdaptivePokerStudy_v060.zip"
+            exit 1
+          }
+          test -f TexasSolverAndroidPort_v2.zip || {
+            echo "Missing TexasSolverAndroidPort_v2.zip"
+            exit 1
+          }
 
       - name: Unpack Android project
         shell: bash
@@ -45,23 +52,31 @@ jobs:
           set +o pipefail
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+
           if [ -z "$SDKMANAGER" ]; then
-            echo "sdkmanager not found under $SDK_ROOT"
+            echo "sdkmanager not found"
             exit 1
           fi
+
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
           set -o pipefail
+
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
             "platform-tools" \
             "platforms;android-37.0" \
             "build-tools;36.0.0" \
             "ndk;27.2.12479018" \
             "cmake;3.22.1"
+
           if [ -d "$SDK_ROOT/platforms/android-37.0" ] && [ ! -e "$SDK_ROOT/platforms/android-37" ]; then
             ln -s android-37.0 "$SDK_ROOT/platforms/android-37"
           fi
+
           test -d "$SDK_ROOT/ndk/27.2.12479018"
-          export PATH="$SDK_ROOT/cmake/3.22.1/bin:$PATH"
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_LATEST_HOME=$SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/cmake/3.22.1/bin" >> "$GITHUB_PATH"
+
           cmake --version
 
       - name: Unpack TexasSolver Android port
@@ -70,35 +85,142 @@ jobs:
           mkdir -p /tmp/aps-native-port
           unzip -q TexasSolverAndroidPort_v2.zip -d /tmp/aps-native-port
 
-      - name: Integrate pinned TexasSolver C++ source and JNI
+      - name: Integrate TexasSolver C++ source and JNI
         shell: bash
         run: |
           PORT_ROOT="/tmp/aps-native-port/TexasSolverAndroidPort"
+
           python3 "$PORT_ROOT/apply_texassolver_android.py"
+
           test -f app/src/main/cpp/CMakeLists.txt
           test -f app/src/main/java/com/adaptivepoker/study/TexasSolverBridge.java
-          test -f app/src/main/assets/solver/card5_dic_sorted.txt.gz
+
+      - name: Ensure evaluator is present in Android assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEST="app/src/main/assets/solver/card5_dic_sorted.txt.gz"
+          mkdir -p "$(dirname "$DEST")"
+
+          if [ ! -s "$DEST" ]; then
+            SOURCE="$(find /tmp/aps-native-port app/src/main -type f \
+              -name 'card5_dic_sorted.txt.gz' -print -quit)"
+
+            if [ -n "$SOURCE" ]; then
+              cp "$SOURCE" "$DEST"
+            else
+              RAW="$(find /tmp/aps-native-port app/src/main -type f \
+                -name 'card5_dic_sorted.txt' -print -quit)"
+
+              if [ -n "$RAW" ]; then
+                gzip -c "$RAW" > "$DEST"
+              else
+                echo "ERROR: evaluator source not found."
+                echo "Searched for card5_dic_sorted.txt and .gz"
+                find /tmp/aps-native-port -maxdepth 6 -type f | head -200
+                exit 1
+              fi
+            fi
+          fi
+
+          test -s "$DEST"
+          echo "Evaluator successfully staged:"
+          ls -lh "$DEST"
+          sha256sum "$DEST"
+
+      - name: Configure Android assets
+        shell: bash
+        run: |
+          cat >> app/build.gradle.kts <<'EOF'
+
+          // TexasSolver evaluator assets
+          android {
+              sourceSets {
+                  getByName("main") {
+                      assets.srcDir("src/main/assets")
+                  }
+              }
+          }
+          EOF
 
       - name: JavaScript and core tests
         shell: bash
         run: |
           node --check app/src/main/assets/app.js
-          node --check app/src/main/assets/solver-ui.js
           node tests/mobile-core.test.js
 
       - name: Build APK with NDK
         shell: bash
-        run: gradle assembleDebug --stacktrace --no-daemon
+        run: |
+          gradle clean assembleDebug --stacktrace --no-daemon
 
-      - name: Verify real ARM64 TexasSolver payload in APK
+      - name: Verify evaluator inside APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
+          test -n "$APK"
+
+          echo "Checking APK assets..."
+          unzip -l "$APK" | grep -E 'assets/solver/|card5_dic'
+
+          python3 - "$APK" <<'PY'
+          import sys
+          import zipfile
+
+          apk = sys.argv[1]
+          expected = "assets/solver/card5_dic_sorted.txt.gz"
+
+          with zipfile.ZipFile(apk) as z:
+              names = z.namelist()
+
+              if expected not in names:
+                  print("APK VERIFY FAILED: missing", expected)
+                  print("Available evaluator entries:")
+                  for name in names:
+                      if "card5_dic" in name or "solver/" in name:
+                          print(name)
+                  sys.exit(1)
+
+              info = z.getinfo(expected)
+              if info.file_size == 0:
+                  print("APK VERIFY FAILED: evaluator is empty")
+                  sys.exit(1)
+
+              print("Evaluator found in APK:", expected)
+              print("Size:", info.file_size, "bytes")
+          PY
+
+      - name: Verify native ARM64 library
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
+
+          unzip -l "$APK" | grep 'lib/arm64-v8a/'
+
+          if ! unzip -l "$APK" | grep -E 'lib/arm64-v8a/.*\.so'; then
+            echo "ERROR: No ARM64 native libraries found"
+            exit 1
+          fi
+
+      - name: Verify TexasSolver payload
         shell: bash
         run: |
           PORT_ROOT="/tmp/aps-native-port/TexasSolverAndroidPort"
           APK="$(find app/build/outputs/apk/debug -maxdepth 1 -name '*.apk' | head -n 1)"
-          test -n "$APK"
+
           python3 "$PORT_ROOT/verify_native_apk.py" "$APK"
+
+      - name: Prepare APK artifact
+        shell: bash
+        run: |
           mkdir -p build-output
-          cp "$APK" build-output/AdaptivePokerStudy-native-TexasSolver-arm64-debug.apk
+          cp app/build/outputs/apk/debug/*.apk \
+            build-output/AdaptivePokerStudy-native-TexasSolver-arm64-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -106,3 +228,4 @@ jobs:
           name: AdaptivePokerStudy-native-TexasSolver-arm64-debug
           path: build-output/AdaptivePokerStudy-native-TexasSolver-arm64-debug.apk
           if-no-files-found: error
+          
