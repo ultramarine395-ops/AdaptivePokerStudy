@@ -1,0 +1,60 @@
+
+name: Unpack project and build APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'AdaptivePokerStudy_v060.zip'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Unpack ZIP
+        run: |
+          unzip -q AdaptivePokerStudy_v060.zip -d /tmp/project
+          cp -a /tmp/project/AdaptivePokerAndroid/. .
+          rm -f AdaptivePokerStudy_v060.zip
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Extract Android project"
+          git push
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.6.0'
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Tests
+        run: |
+          node --check app/src/main/assets/app.js
+          node tests/mobile-core.test.js
+
+      - name: Build APK
+        run: gradle assembleDebug
+
+      - name: Save APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AdaptivePokerStudy-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
