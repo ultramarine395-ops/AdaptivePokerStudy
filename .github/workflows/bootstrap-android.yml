@@ -32,6 +32,7 @@ jobs:
         with:
           gradle-version: '9.6.0'
 
+     
       - name: Android SDK
         shell: bash
         run: |
@@ -39,16 +40,17 @@ jobs:
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
 
-          if [ -z "$SDKMANAGER" ]; then
-            echo "sdkmanager not found"
-            exit 1
-          fi
-
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
+
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
             "platform-tools" \
-            "platforms;android-37" \
+            "platforms;android-37.0" \
             "build-tools;36.0.0"
+
+          if [ -d "$SDK_ROOT/platforms/android-37.0" ] && [ ! -e "$SDK_ROOT/platforms/android-37" ]; then
+            ln -s android-37.0 "$SDK_ROOT/platforms/android-37"
+          fi
+
 
 
 
