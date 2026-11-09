@@ -1,4 +1,3 @@
-
 name: Bootstrap and build AdaptivePokerStudy with GTOpen + TexasSolver
 
 on:
@@ -15,17 +14,27 @@ jobs:
       - name: Checkout repository with source archive
         uses: actions/checkout@v4
 
-      - name: Check updated source archive
+      - name: Locate uploaded source archive
+        id: source-archive
+        shell: bash
         run: |
-          test -f AdaptivePokerStudy_v070.zip || {
-            echo "Upload AdaptivePokerStudy_v070.zip to the repository root first."
-            exit 1
-          }
+          set -euo pipefail
+          # Detect the archive already uploaded to the repository.
+          for candidate in AdaptivePokerStudy_v070.zip APS_v070_download.zip; do
+            if [[ -f "$candidate" ]]; then
+              echo "path=$candidate" >> "$GITHUB_OUTPUT"
+              echo "Using source archive: $candidate"
+              exit 0
+            fi
+          done
+          echo "Source archive not found. Expected AdaptivePokerStudy_v070.zip or APS_v070_download.zip in repository root."
+          ls -la
+          exit 1
 
       - name: Unpack Android project into repository root
         run: |
           mkdir -p /tmp/aps-project
-          unzip -q AdaptivePokerStudy_v070.zip -d /tmp/aps-project
+          unzip -q "${{ steps.source-archive.outputs.path }}" -d /tmp/aps-project
           test -d /tmp/aps-project/AdaptivePokerAndroid/app
           cp -a /tmp/aps-project/AdaptivePokerAndroid/. .
 
@@ -115,3 +124,4 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
+          
